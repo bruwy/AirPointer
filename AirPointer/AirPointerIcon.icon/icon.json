@@ -1,0 +1,40 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "image-name" : "ChatGPT Image Jul 29, 2025, 12_15_52 AM.png",
+          "name" : "ChatGPT Image Jul 29, 2025, 12_15_52 AM",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 1.18,
+            "translation-in-points" : [
+              -1.3384083524270536,
+              16.965846785595208
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

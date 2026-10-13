@@ -1,0 +1,37 @@
+# macOS / local IDE state
+.DS_Store
+xcuserdata/
+*.xcuserstate
+.vscode/
+.idea/
+
+# Build products and test results
+.build/
+.swiftpm/
+DerivedData/
+build/
+dist/
+*.app/
+*.dSYM/
+*.xcresult/
+*.xcarchive/
+*.zip
+*.log
+
+# Local configuration and signing material
+.env
+.env.*
+!.env.example
+*.xcconfig.local
+*.p12
+*.p8
+*.pem
+*.key
+*.mobileprovision
+*.provisionprofile
+
+# Real hand recordings and private diagnostics
+*.airframes.json
+Recordings/
+Evidence/
+Archive/
