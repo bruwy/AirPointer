@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="AirPointer/AirPointerIcon.icon/Assets/ChatGPT%20Image%20Jul%2029%2C%202025%2C%2012_15_52%20AM.png" alt="AirPointer app icon" width="128" height="128">
+</p>
+
 # AirPointer
 
 Control your Mac with camera-based hand gestures. AirPointer uses Apple's Vision framework to track hands locally, then translates gestures into pointer movement, clicks and shortcuts.
