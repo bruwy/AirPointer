@@ -9,6 +9,7 @@ struct RelativePointerEngine {
     private var emitted: CGPoint?
     private var lastAt: Date?
     private var anchorScale: CGFloat?
+    var isAnchored: Bool { raw != nil }
 
     mutating func reset() {
         raw = nil; filtered = nil; emitted = nil; lastAt = nil; anchorScale = nil

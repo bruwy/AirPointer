@@ -199,7 +199,7 @@ struct OfflineCommandPipelineTests {
         #expect(h.performer.actions.isEmpty)
     }
 
-    @Test func missingAccessibilityBlocksCommandsAndMouse() {
+    @Test func missingAccessibilityBlocksInputButKeepsTheVisualLaser() {
         let h = OfflineHarness(accessibility: .notTrusted)
         h.feed(doublePinchSequence(side: .right, startingAt: 0))
         #expect(h.performer.actions.isEmpty)
@@ -210,7 +210,7 @@ struct OfflineCommandPipelineTests {
         joints[.indexTip] = CGPoint(x: 0.5, y: 0.7)
         joints[.littleTip] = CGPoint(x: 0.55, y: 0.45)
         for i in 0..<6 { h.feed([jointsFrame(joints, at: 1 + Double(i) / 30)]) }
-        #expect(h.viewModel.pointerLocation == nil)
+        #expect(h.viewModel.pointerLocation == joints[.indexTip])
         #expect(h.performer.actions.isEmpty)
     }
 
@@ -391,18 +391,30 @@ struct OfflineHarness {
     let viewModel: ContentViewModel
     let performer = OfflineRecordingPerformer()
     let permissions: MutableOfflinePermissions
+    let feedbackClock: OfflineFeedbackClock
 
     init(accessibility: AccessibilityPermissionStatus = .trusted) {
         permissions = MutableOfflinePermissions(accessibility: accessibility)
+        let clock = OfflineFeedbackClock()
+        feedbackClock = clock
         core = AirCore(tracker: HandTracker(configuresCamera: false))
         viewModel = ContentViewModel(engine: core, gestureRecognizer: AirGestureRecognizer(),
-                                     systemActions: performer, permissionClient: permissions)
+                                     systemActions: performer, permissionClient: permissions,
+                                     feedbackDefaults: nil, feedbackNow: { clock.now })
         viewModel.start()
     }
 
     func feed(_ frames: [AirFrame]) {
-        for frame in frames { viewModel.airCore(core, didUpdate: frame) }
+        for frame in frames {
+            feedbackClock.now = frame.timestamp.timeIntervalSinceReferenceDate
+            viewModel.airCore(core, didUpdate: frame)
+        }
     }
+}
+
+@MainActor
+final class OfflineFeedbackClock {
+    var now: TimeInterval = 0
 }
 
 @MainActor
@@ -412,6 +424,11 @@ final class OfflineRecordingPerformer: SystemActionPerforming {
     var onPerform: ((SystemAction) -> Void)?
     var clicks: [Bool] { actions.compactMap { if case .clickMouse(let right) = $0 { right } else { nil } } }
     var moves: [CGVector] { actions.compactMap { if case .moveMouseBy(let delta) = $0 { delta } else { nil } } }
+    var buttonDowns: [MouseButton] { actions.compactMap { if case .mouseButton(let b, pressed: true) = $0 { b } else { nil } } }
+    var buttonUps: [MouseButton] { actions.compactMap { if case .mouseButton(let b, pressed: false) = $0 { b } else { nil } } }
+    var drags: [(delta: CGVector, button: MouseButton)] {
+        actions.compactMap { if case .dragMouseBy(let d, let b) = $0 { (d, b) } else { nil } }
+    }
     var scrolls: [SystemAction] { actions.filter { if case .scroll = $0 { true } else { false } } }
     var keyCodes: [CGKeyCode] {
         actions.compactMap { if case .shortcut(let s) = $0 { s.keyCode } else { nil } }

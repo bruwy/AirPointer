@@ -64,24 +64,57 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
                 _ = frameRecorder.stop(label: "discarded")
                 isRecordingFrames = false
             }
-            diagnosticLeftClicks = 0; diagnosticRightClicks = 0
+            diagnosticLeftClicks = 0; diagnosticRightClicks = 0; diagnosticMiddleClicks = 0
         }
     }
     @Published private(set) var mouseStatus = "Close fingers to begin"
     @Published private(set) var mouseEvidence = ""
+    @Published private(set) var mouseButtonStatus = "Buttons: waiting for left hand"
     @Published private(set) var diagnosticLeftClicks = 0
     @Published private(set) var diagnosticRightClicks = 0
+    @Published private(set) var diagnosticMiddleClicks = 0
 
-	@Published var pointerLocation: CGPoint? = nil  // Normalized coordinates (0-1)
+    static let cursorFeedbackPreferenceKey = "cursorFeedbackEnabled"
+    static let gesturesEnabledPreferenceKey = "gesturesEnabled"
+    @Published var gesturesEnabled: Bool {
+        didSet {
+            guard oldValue != gesturesEnabled else { return }
+            feedbackDefaults?.set(gesturesEnabled, forKey: Self.gesturesEnabledPreferenceKey)
+            resetGestureState()
+            resumeGate.requireNeutral()
+            updateResumeHint()
+        }
+    }
+    @Published private(set) var gestureResumeHint: String?
+    @Published var cursorFeedbackEnabled: Bool {
+        didSet {
+            guard oldValue != cursorFeedbackEnabled else { return }
+            feedbackDefaults?.set(cursorFeedbackEnabled, forKey: Self.cursorFeedbackPreferenceKey)
+            cursorFeedback.cancel()
+        }
+    }
+    @Published private(set) var cursorFeedback = CursorFeedbackState()
+
+	@Published var pointerLocation: CGPoint? = nil { // Normalized laser coordinates (0-1)
+        didSet { if pointerLocation != nil && heldButtons.pressedButton == nil { cursorFeedback.cancel() } }
+    }
 
 	private let tracker: HandTracker
 	private let engine: AirCore
 	private let gestureRecognizer: AirGestureRecognizer
 	private let mouseEngine = LeftMouseEngine()
+    private let heldButtons = HeldMouseButtonSession()
+    private var diagnosticButton: MouseButton?
+    private var resumeGate = GestureResumeGate()
+    private var safetyTimer: Timer?
+    private var lastFrameReceivedAt: TimeInterval?
 	private let dwEngine = DeepworkEngine()
 	private let dispatcher: IntentDispatcher
 	private let systemActions: SystemActionPerforming
 	private let permissionClient: PermissionClient
+    private let feedbackDefaults: UserDefaults?
+    private let feedbackNow: () -> TimeInterval
+    private var cursorWasPaused = false
 	private let frameRecorder = AirFrameRecorder()
 	private var started = false
 	private var actionRevision = 0
@@ -102,7 +135,9 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
 		engine: AirCore? = nil,
 		gestureRecognizer: AirGestureRecognizer,
 		systemActions: SystemActionPerforming,
-		permissionClient: PermissionClient
+		permissionClient: PermissionClient,
+        feedbackDefaults: UserDefaults? = .standard,
+        feedbackNow: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 	) {
 		let tracker = engine?.tracker ?? HandTracker()
 		self.tracker = tracker
@@ -111,6 +146,10 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
 		self.systemActions = systemActions
 		self.dispatcher = IntentDispatcher(performer: systemActions)
 		self.permissionClient = permissionClient
+        self.feedbackDefaults = feedbackDefaults
+        self.feedbackNow = feedbackNow
+        self.cursorFeedbackEnabled = feedbackDefaults?.object(forKey: Self.cursorFeedbackPreferenceKey) as? Bool ?? true
+        self.gesturesEnabled = feedbackDefaults?.object(forKey: Self.gesturesEnabledPreferenceKey) as? Bool ?? true
 		self.permissionSnapshot = permissionClient.runtimeSnapshot()
 		setup()
 	}
@@ -119,7 +158,9 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
 		guard !started else { return }
 		refreshPermissionSnapshot()
 		guard permissionSnapshot.camera.isAuthorized else { return }
+        guard releaseHeldButtons() else { startSafetyTimer(); return }
 		started = true
+        startSafetyTimer()
 		engine.start()
 	}
 
@@ -128,7 +169,10 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
 		started = false
 		resetGestureState()
 		if wasStarted { engine.stop() }
+        if !heldButtons.releasePending { safetyTimer?.invalidate(); safetyTimer = nil }
 	}
+
+    deinit { safetyTimer?.invalidate() }
 
 	func refreshPermissionSnapshot() {
 		let snapshot = permissionClient.runtimeSnapshot()
@@ -280,13 +324,20 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
 
     private func cancelPendingActions() {
         actionRevision &+= 1
+        _ = releaseHeldButtons()
+        diagnosticButton = nil
+        lastFrameReceivedAt = nil
         tracker.invalidatePendingObservations()
+        resumeGate.interrupt()
         gestureRecognizer.reset()
         dwEngine.reset()
         mouseEngine.reset()
+        cursorFeedback.cancel()
+        cursorWasPaused = false
         resetPointer()
-        mouseStatus = "Close fingers to begin"
+        mouseStatus = gesturesEnabled ? "Close fingers to begin" : "Gestures off"
         mouseEvidence = ""
+        mouseButtonStatus = gesturesEnabled ? "Buttons: waiting for neutral" : "Buttons: gestures off"
     }
 
 	private func resetGestureState() {
@@ -299,18 +350,39 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
 		lastGestureDate = nil
 		lastIntentDate = nil
 		commandLabel = "No command yet"
-		commandStatus = .idle
+		commandStatus = heldButtons.releasePending ? .failed : .idle
 	}
 
 	@discardableResult
 	private func submit(_ action: SystemAction, label: String) -> Bool {
+        guard gesturesEnabled else { return false }
         if diagnosticOnly {
             commandLabel = label
             commandStatus = .diagnostic
             return true // recognition continues, but no performer is called
         }
 		commandLabel = label
-        guard started else { cancelPendingActions(); return false }
+        guard prepareSubmission() else { return false }
+        let revision = actionRevision
+		let status: CommandDeliveryStatus = systemActions.perform(action) ? .submitted : .failed
+		guard revision == actionRevision, started else { return false }
+		if status != .submitted { cancelPendingActions() }
+		if commandStatus != status {
+			commandLogger.notice("Command \(label, privacy: .public): \(status.rawValue, privacy: .public)")
+			commandStatus = status
+		}
+        if status == .submitted, canShowCursorFeedback {
+            switch action {
+            case .clickMouse, .shortcut, .mouseButton(_, pressed: true):
+                cursorFeedback.recognize(at: feedbackNow())
+            default: break // Continuous movement/scroll never pulses.
+            }
+        }
+		return status == .submitted
+	}
+
+    private func prepareSubmission() -> Bool {
+        guard started, gesturesEnabled else { cancelPendingActions(); return false }
         let snapshot = permissionClient.runtimeSnapshot()
         let accessibility = snapshot.accessibility
         if snapshot != permissionSnapshot {
@@ -322,26 +394,21 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
                 return false
             }
         }
-        let revision = actionRevision
-		let status: CommandDeliveryStatus = accessibility.isTrusted
-			? (systemActions.perform(action) ? .submitted : .failed)
-			: .blockedAccessibility
-		guard revision == actionRevision, started else { return false }
-		if status != .submitted { cancelPendingActions() }
-		if commandStatus != status {
-			commandLogger.notice("Command \(label, privacy: .public): \(status.rawValue, privacy: .public)")
-			commandStatus = status
-		}
-		return status == .submitted
-	}
+        guard accessibility.isTrusted else {
+            cancelPendingActions()
+            commandStatus = .blockedAccessibility
+            return false
+        }
+        return true
+    }
 
 	func getEngine() -> AirCore { engine }
 	var handTracker: HandTracker { tracker }
 
 	// MARK: - AirCoreDelegate
-	func airCore(_ core: AirCore, didUpdate frame: AirFrame) {
+	func airCore(_ core: AirCore, didUpdate observedFrame: AirFrame) {
         guard started, permissionSnapshot.camera.isAuthorized else { return }
-        let timestamp = frame.timestamp
+        let timestamp = observedFrame.timestamp
         guard timestamp.timeIntervalSinceReferenceDate.isFinite else { cancelPendingActions(); return }
         if let last = lastProcessedFrameAt {
             let delta = timestamp.timeIntervalSince(last)
@@ -352,14 +419,19 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
             }
         }
         lastProcessedFrameAt = timestamp
+        lastFrameReceivedAt = feedbackNow()
         let revision = actionRevision
+        let previousFeedbackCommand = cursorFeedback.commandID
 		if isRecordingFrames {
-			frameRecorder.append(frame)
+			frameRecorder.append(observedFrame)
 		}
 
-		self.handJoints = frame.hands.reduce(into: [:]) { dict, hand in
+		self.handJoints = observedFrame.hands.reduce(into: [:]) { dict, hand in
 			dict[hand.side.rawValue] = hand.joints
 		}
+        guard gesturesEnabled else { return }
+        let frame = resumeGate.filter(observedFrame)
+        updateResumeHint()
 		self.gestureRecognizer.process(frame: frame)
         guard revision == actionRevision else { cancelPendingActions(); return }
 
@@ -383,6 +455,10 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
             let lState = (pinch: l.isPinching && mousePose != .closed, fist: l.isFist, dist: l.pinchDist)
 			let rState = (pinch: r.isPinching, fist: r.isFist, dist: r.pinchDist)
 
+            if lState.pinch && heldButtons.pressedButton != nil {
+                guard releaseHeldButtons() else { cancelPendingActions(); return }
+            }
+
 			let actions = self.dwEngine.process(
 				frame: frame, leftState: lState, rightState: rState)
             guard self.execute(actions), revision == actionRevision else { return }
@@ -390,20 +466,106 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
         let mouse = mouseEngine.process(frame: frame,
             reservePinch: activeProfile == .deepwork && (enableScroll || enableScrub),
             sensitivity: mouseSensitivity)
-        mouseStatus = mouse.status
+        mouseStatus = resumeGate.waiting.contains(.left) ? "Rearm left hand — relax or open fingers" : mouse.status
         mouseEvidence = mouse.evidence
-        pointerLocation = nil
+        mouseButtonStatus = resumeGate.waiting.contains(.left) ? "Buttons: rearm left hand — relax or open fingers" : mouse.buttonStatus
+        if activeProfile == .deepwork, r.isPointing,
+           let point = frame.hand(for: .right)?.joints[.indexTip], MouseHandPose.valid(point) {
+            pointerLocation = point
+        } else if pointerLocation != nil { pointerLocation = nil }
+        if diagnosticOnly {
+            if mouse.desiredButton != diagnosticButton, let button = mouse.desiredButton {
+                switch button {
+                case .left: diagnosticLeftClicks += 1
+                case .right: diagnosticRightClicks += 1
+                case .middle: diagnosticMiddleClicks += 1
+                }
+                commandLabel = button.title
+                commandStatus = .diagnostic
+            }
+            diagnosticButton = mouse.desiredButton
+        } else {
+            if mouse.desiredButton != nil && heldButtons.pressedButton == nil {
+                guard prepareSubmission(), revision == actionRevision else { return }
+            }
+            let accepted = heldButtons.update(desired: mouse.desiredButton) { action in
+                if case .mouseButton(_, pressed: false) = action { return systemActions.perform(action) }
+                return submit(action, label: mouse.desiredButton?.title ?? "Release mouse button")
+            }
+            guard revision == actionRevision else { return }
+            guard accepted else {
+                cancelPendingActions()
+                if started { commandStatus = .failed }
+                return
+            }
+        }
+        mouseButtonStatus += diagnosticOnly ? " · diagnostic only" : " · posted: \(heldButtons.pressedButton?.title ?? "none")"
         if let delta = mouse.delta {
-            guard submit(.moveMouseBy(delta), label: "Left hand: trackpad"),
+            let action = heldButtons.pressedButton.map { SystemAction.dragMouseBy(delta, button: $0) }
+                ?? .moveMouseBy(delta)
+            guard submit(action, label: "Left hand: trackpad"),
                   revision == actionRevision else { return }
         }
-        if let right = mouse.rightClick {
-            if diagnosticOnly {
-                if right { diagnosticRightClicks += 1 } else { diagnosticLeftClicks += 1 }
+        guard revision == actionRevision else { return }
+        if canShowCursorFeedback && !frame.hands.isEmpty {
+            if mouse.isPaused && !cursorWasPaused && cursorFeedback.commandID == previousFeedbackCommand {
+                cursorFeedback.cancel()
             }
-            submit(.clickMouse(buttonRight: right), label: right ? "Right click" : "Left click")
+            cursorWasPaused = mouse.isPaused
+            cursorFeedback.update(ready: mouse.isReady, at: feedbackNow(), pressedButton: heldButtons.pressedButton)
+        } else {
+            cursorFeedback.cancel()
+            cursorWasPaused = false
         }
 	}
+
+    private var canShowCursorFeedback: Bool {
+        started && gesturesEnabled && cursorFeedbackEnabled && !diagnosticOnly
+            && permissionSnapshot.isReadyForTracking && (pointerLocation == nil || heldButtons.pressedButton != nil)
+    }
+
+    // Called by the overlay's lightweight cursor timer, including camera stalls.
+    func expireCursorFeedback(at now: TimeInterval? = nil) {
+        var feedback = cursorFeedback
+        if canShowCursorFeedback { feedback.expire(at: now ?? feedbackNow()) }
+        else { feedback.cancel() }
+        if feedback != cursorFeedback { cursorFeedback = feedback }
+    }
+
+    @discardableResult
+    private func releaseHeldButtons() -> Bool {
+        let hadButton = heldButtons.pressedButton != nil
+        let success = heldButtons.release { systemActions.perform($0) }
+        if !success { commandStatus = .failed }
+        else if hadButton { cursorFeedback.cancel() }
+        return success
+    }
+
+    // Button safety is independent of whether the user enables the visual halo.
+    func expireTrackingState(at now: TimeInterval? = nil) {
+        if heldButtons.pressedButton != nil && permissionClient.runtimeSnapshot() != permissionSnapshot {
+            refreshPermissionSnapshot()
+        }
+        if heldButtons.releasePending { _ = releaseHeldButtons() }
+        if let lastFrameReceivedAt {
+            let age = (now ?? feedbackNow()) - lastFrameReceivedAt
+            if !age.isFinite || age < 0 || age > AppConfig.GestureTuning.maximumFrameGap {
+                cancelPendingActions()
+            }
+        }
+        expireCursorFeedback(at: now)
+        if !started && !heldButtons.releasePending { safetyTimer?.invalidate(); safetyTimer = nil }
+    }
+
+    private func startSafetyTimer() {
+        guard safetyTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.expireTrackingState() }
+        }
+        timer.tolerance = 0.01
+        RunLoop.main.add(timer, forMode: .common)
+        safetyTimer = timer
+    }
 
 	var intentLabel: String {
 		guard let intent = latestIntent else { return "No intent yet" }
@@ -416,7 +578,7 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
 		setProfile(activeProfile)
 
 		gestureRecognizer.onGesture = { [weak self] event in
-				guard let self, self.started,
+				guard let self, self.started, self.gesturesEnabled,
 					self.gestureRecognizer.allowedGestures.contains(event.gesture) else { return }
 				self.latestGesture = event.gesture
 				self.lastGestureDate = event.timestamp
@@ -433,5 +595,13 @@ final class ContentViewModel: ObservableObject, AirCoreDelegate {
 
     private func resetPointer() {
         pointerLocation = nil
+    }
+
+    private func updateResumeHint() {
+        guard gesturesEnabled, !resumeGate.waiting.isEmpty else { gestureResumeHint = nil; return }
+        var instructions: [String] = []
+        if resumeGate.waiting.contains(.left) { instructions.append("Left: relax or open fingers") }
+        if resumeGate.waiting.contains(.right) { instructions.append("Right: open hand") }
+        gestureResumeHint = instructions.joined(separator: " · ")
     }
 }

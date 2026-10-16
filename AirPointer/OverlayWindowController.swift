@@ -5,18 +5,26 @@ import Combine
 @MainActor
 class OverlayWindowController {
     private var window: NSWindow?
-    private var viewModel: ContentViewModel
+    private let viewModel: ContentViewModel
     private var cancellables = Set<AnyCancellable>()
     
     init(viewModel: ContentViewModel) {
         self.viewModel = viewModel
-        setupWindow()
+        viewModel.$activeProfile.combineLatest(viewModel.$pointerLocation)
+            .sink { [weak self] profile, location in
+                guard let self else { return }
+                if profile == .deepwork && location != nil {
+                    if self.window == nil { self.setupWindow() }
+                    self.window?.orderFront(nil)
+                } else { self.window?.orderOut(nil) }
+            }
+            .store(in: &cancellables)
     }
     
     private func setupWindow() {
-        let win = NSWindow(
+        let win = LaserOverlayPanel(
             contentRect: NSScreen.main?.frame ?? .zero,
-            styleMask: [.borderless, .fullSizeContentView],
+            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -25,6 +33,8 @@ class OverlayWindowController {
         win.backgroundColor = .clear
         win.level = .floating // Above normal windows
         win.ignoresMouseEvents = true // Pass clicks through
+        win.hidesOnDeactivate = false
+        win.isReleasedWhenClosed = false
         win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         // Host the Laser View in a wrapper that observes the ViewModel.
@@ -34,16 +44,6 @@ class OverlayWindowController {
         
         self.window = win
         
-        // Observe profile to show/hide
-        viewModel.$activeProfile
-            .sink { [weak self] profile in
-                if profile == .deepwork {
-                    self?.window?.orderFront(nil)
-                } else {
-                    self?.window?.orderOut(nil)
-                }
-            }
-            .store(in: &cancellables)
     }
     
     private struct OverlayRootView: View {
@@ -59,4 +59,10 @@ class OverlayWindowController {
             .accessibilityHidden(true)
         }
     }
+}
+
+@MainActor
+private final class LaserOverlayPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 }

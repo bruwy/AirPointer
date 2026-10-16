@@ -12,7 +12,7 @@ let package = Package(
             path: "AirPointer",
             exclude: ["AirPointerApp.swift", "ContentView.swift", "CameraView.swift",
                       "LaserPointerView.swift", "HandSkeletonOverlayView.swift",
-                      "OverlayWindowController.swift", "Assets.xcassets",
+                      "OverlayWindowController.swift", "CursorFeedbackWindowController.swift", "Assets.xcassets",
                       "AirPointerIcon.icon", "Info.plist"],
             swiftSettings: [.defaultIsolation(MainActor.self), .swiftLanguageMode(.v5)]
         ),

@@ -10,124 +10,135 @@ struct ContentView: View {
 	@State private var showHUD: Bool = AppConfig.showHUD
 	@State private var showGestureMenu: Bool = false
 
-	var body: some View {
-		GeometryReader { geo in
-			ZStack(alignment: .topLeading) {
-				
-				// --- CAMADA 1: VÍDEO E OVERLAY ---
-				ZStack {
-					// Assume que CameraView pega o engine ou session internamente
-					CameraView(engine: viewModel.getEngine())
-						.frame(width: geo.size.width, height: geo.size.height)
+    var body: some View {
+        VStack(spacing: 0) {
+            gestureMasterBar
+            GeometryReader { geo in
+                ZStack {
+                    CameraView(engine: viewModel.getEngine())
+                        .frame(width: geo.size.width, height: geo.size.height)
+                    if showSkeletonOverlay {
+                        HandSkeletonOverlayView(hands: viewModel.handJoints, mirrorHorizontally: true)
+                            .allowsHitTesting(false)
+                    }
+                    VStack(spacing: 12) {
+                        controlBar
+                        HStack(alignment: .top, spacing: 16) {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    if !viewModel.permissionSnapshot.isReadyForTracking {
+                                        PermissionStatusPanel(
+                                            snapshot: viewModel.permissionSnapshot,
+                                            requestCamera: { Task { await viewModel.requestCameraPermission() } },
+                                            promptAccessibility: { viewModel.promptForAccessibilityPermission() },
+                                            openSettings: { viewModel.openPrivacySettings() },
+                                            refresh: {
+                                                viewModel.refreshPermissionSnapshot()
+                                                viewModel.start()
+                                            }
+                                        )
+                                    }
+                                    GestureGuide(activeProfile: viewModel.activeProfile)
+                                    if showHUD {
+                                        IntentHUD(
+                                            lastIntent: viewModel.latestIntent,
+                                            lastIntentDate: viewModel.lastIntentDate,
+                                            lastGesture: viewModel.latestGesture,
+                                            lastGestureDate: viewModel.lastGestureDate,
+                                            activeProfile: viewModel.activeProfile,
+                                            commandLabel: viewModel.commandLabel,
+                                            commandStatus: viewModel.commandStatus,
+                                            handJoints: viewModel.handJoints,
+                                            leftState: viewModel.leftHandState,
+                                            rightState: viewModel.rightHandState,
+                                            isRunning: viewModel.handTracker.session.isRunning
+                                        )
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(width: 340)
+                            Spacer(minLength: 0)
+                            if showGestureMenu {
+                                FloatingGestureMenu(
+                                    enableNext: $viewModel.enableNext,
+                                    enablePrev: $viewModel.enablePrev,
+                                    enableMute: $viewModel.enableMute,
+                                    enableScroll: $viewModel.enableScroll,
+                                    enableScrub: $viewModel.enableScrub,
+                                    enableVolume: $viewModel.enableVolume,
+                                    enablePlayPause: $viewModel.enablePlayPause,
+                                    sensitivity: $viewModel.mouseSensitivity,
+                                    diagnosticOnly: $viewModel.diagnosticOnly,
+                                    cursorFeedbackEnabled: $viewModel.cursorFeedbackEnabled,
+                                    mouseStatus: viewModel.mouseStatus,
+                                    mouseEvidence: viewModel.mouseEvidence,
+                                    mouseButtonStatus: viewModel.mouseButtonStatus,
+                                    diagnosticCounts: "Left: \(viewModel.diagnosticLeftClicks)  Middle: \(viewModel.diagnosticMiddleClicks)  Right: \(viewModel.diagnosticRightClicks)",
+                                    activeProfile: viewModel.activeProfile
+                                )
+                                .frame(width: 340, alignment: .top)
+                            }
+                        }
+                        .frame(maxHeight: .infinity, alignment: .top)
+                    }
+                    .padding(16)
+                }
+                .clipped()
+            }
+        }
+        .frame(minWidth: 800, minHeight: 560)
+        .onAppear {
+            viewModel.refreshPermissionSnapshot()
+            viewModel.updateAllowedGestures()
+            viewModel.start()
+        }
+        .onDisappear { viewModel.stop() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            viewModel.stop()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            viewModel.refreshPermissionSnapshot()
+            viewModel.start()
+        }
+    }
 
-					if showSkeletonOverlay {
-						// Passamos os joints direto do ViewModel
-						HandSkeletonOverlayView(
-							hands: viewModel.handJoints,
-							mirrorHorizontally: true
-						)
-						.frame(width: geo.size.width, height: geo.size.height)
-						.allowsHitTesting(false)
-					}
-				}
-				.ignoresSafeArea()
-
-				if !viewModel.permissionSnapshot.isReadyForTracking {
-					PermissionStatusPanel(
-						snapshot: viewModel.permissionSnapshot,
-						requestCamera: {
-							Task { await viewModel.requestCameraPermission() }
-						},
-						promptAccessibility: {
-							viewModel.promptForAccessibilityPermission()
-						},
-						openSettings: {
-							viewModel.openPrivacySettings()
-						},
-						refresh: {
-							viewModel.refreshPermissionSnapshot()
-							viewModel.start()
-						}
-					)
-					.padding(.top, 96)
-					.padding(.horizontal, 20)
-					.frame(maxWidth: 520, alignment: .topLeading)
-				}
-				
-				// --- CAMADA 2: UI ---
-				VStack {
-					controlBar
-						.padding(.top, 40)
-						.padding(.horizontal)
-					
-					Spacer()
-					
-					if showHUD {
-						HStack {
-							// NOTA: Certifique-se de que 'handTracker' no ContentViewModel NÃO é private
-							IntentHUD(
-								lastIntent: viewModel.latestIntent,
-								lastIntentDate: viewModel.lastIntentDate,
-								lastGesture: viewModel.latestGesture,
-								lastGestureDate: viewModel.lastGestureDate,
-								activeProfile: viewModel.activeProfile,
-								commandLabel: viewModel.commandLabel,
-								commandStatus: viewModel.commandStatus,
-								handJoints: viewModel.handJoints,
-								leftState: viewModel.leftHandState,
-								rightState: viewModel.rightHandState,
-								isRunning: viewModel.handTracker.session.isRunning
-							)
-							Spacer()
-						}
-						.padding(.bottom, 40)
-						.padding(.leading, 20)
-					}
-					
-					if showGestureMenu {
-						FloatingGestureMenu(
-							enableNext: $viewModel.enableNext,
-							enablePrev: $viewModel.enablePrev,
-							enableMute: $viewModel.enableMute,
-							enableScroll: $viewModel.enableScroll,
-							enableScrub: $viewModel.enableScrub,
-							enableVolume: $viewModel.enableVolume,
-							enablePlayPause: $viewModel.enablePlayPause,
-                            sensitivity: $viewModel.mouseSensitivity,
-                            diagnosticOnly: $viewModel.diagnosticOnly,
-                            mouseStatus: viewModel.mouseStatus,
-                            mouseEvidence: viewModel.mouseEvidence,
-                            diagnosticCounts: "Left: \(viewModel.diagnosticLeftClicks)  Right: \(viewModel.diagnosticRightClicks)",
-							activeProfile: viewModel.activeProfile
-						)
-						.frame(width: 340)
-						.padding(.bottom, 40)
-						.padding(.trailing, 20)
-						.transition(.move(edge: .trailing).combined(with: .opacity))
-						.alignmentGuide(.trailing) { d in d[.trailing] }
-						.alignmentGuide(.bottom) { d in d[.bottom] }
-					}
-				}
-			}
-		}
-		.onAppear {
-			viewModel.refreshPermissionSnapshot()
-			viewModel.updateAllowedGestures()
-			viewModel.start()
-		}
-		.onDisappear { viewModel.stop() }
-		.onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-			viewModel.stop()
-		}
-		.onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-			viewModel.refreshPermissionSnapshot()
-			viewModel.start()
-		}
-	}
+    // Outside both scroll views and settings: the stop control is always reachable.
+    private var gestureMasterBar: some View {
+        HStack(spacing: 16) {
+            Toggle(isOn: $viewModel.gesturesEnabled) {
+                Label("Gestures", systemImage: "hand.raised.fill")
+                    .font(.headline)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.large)
+            .fixedSize()
+            .accessibilityLabel("Enable gestures")
+            .accessibilityValue(viewModel.gesturesEnabled ? "On" : "Off")
+            .help("Pause all gesture commands and release held buttons. The camera preview stays available.")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(viewModel.gesturesEnabled ? "Gestures on" : "Gestures off")
+                    .font(.subheadline.bold())
+                Text(viewModel.gestureResumeHint ?? (viewModel.gesturesEnabled
+                     ? "Trackpad + Hold · Left hand moves and clicks"
+                     : "Commands paused · Camera preview available"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(viewModel.mouseButtonStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("mouse-button-status")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+        .background(.bar)
+    }
 
 	private var controlBar: some View {
 		HStack(spacing: 12) {
-            Text("V4 Trackpad").font(.caption.bold())
 			Picker("Profile", selection: Binding(get: { viewModel.activeProfile }, set: { viewModel.setProfile($0) })) {
 				ForEach(AirProfileKind.allCases, id: \.self) { profile in
 					Text(profile.title).tag(profile)
@@ -189,6 +200,55 @@ struct ContentView: View {
 				.stroke(.white.opacity(0.1), lineWidth: 1)
 		)
 	}
+}
+
+private struct GestureGuide: View {
+    let activeProfile: AirProfileKind
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Gesture guide", systemImage: "hand.draw")
+                .font(.headline)
+            Text("LEFT HAND · ALL PROFILES").font(.caption.bold())
+            row("Relaxed closed fingers + wrist movement", "Move cursor")
+            row("Open all four fingers", "Release, pause and reposition; close to resume")
+            row("Thumb + ring", "Left button")
+            row("Thumb + middle", "Middle button")
+            row("Four fingers curled + thumb extended", "Right button")
+            Text("Hold a button pose to keep it pressed. Move the wrist to drag; release the pose to let go.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            profileTitle(.presentation)
+            row("Right · thumb + index, twice", "Next slide →")
+            row("Right · open, then fist for 0.25 s", "Previous slide ←; reopen to rearm")
+            profileTitle(.call)
+            row("Right · little finger raised for 0.35 s", "Zoom mute · ⇧⌘A; lower to rearm. Also available in Presentation when enabled.")
+            profileTitle(.deepwork)
+            row("Left · thumb + index + wrist offset", "Vertical scroll / horizontal scrub; hold offset to continue, return or release to stop")
+            row("Right · index pointing", "Red laser")
+            row("Right · fist for 1 s", "Play / Pause · Space; release to rearm")
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func profileTitle(_ profile: AirProfileKind) -> some View {
+        HStack(spacing: 6) {
+            Text(profile.title.uppercased()).font(.caption.bold())
+            if activeProfile == profile {
+                Text("ACTIVE").font(.caption2.bold()).foregroundStyle(.tint)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func row(_ pose: String, _ action: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(pose).font(.caption.weight(.medium))
+            Text(action).font(.caption).foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
 }
 
 private struct PermissionStatusPanel: View {
@@ -447,8 +507,10 @@ private struct FloatingGestureMenu: View {
 	@Binding var enablePlayPause: Bool
     @Binding var sensitivity: Double
     @Binding var diagnosticOnly: Bool
+    @Binding var cursorFeedbackEnabled: Bool
     var mouseStatus: String
     var mouseEvidence: String
+    var mouseButtonStatus: String
     var diagnosticCounts: String
 	
 	var activeProfile: AirProfileKind
@@ -461,9 +523,9 @@ private struct FloatingGestureMenu: View {
 				.textCase(.uppercase)
 				.foregroundColor(.white.opacity(0.9))
 
-            Label("V4 Trackpad • Left hand • All modes", systemImage: "cursorarrow")
+            Label("Left mouse • All modes", systemImage: "cursorarrow")
                 .font(.caption.bold())
-            Text("Close/relax the four fingers and move your wrist like a trackpad. Open the hand to reposition without moving the cursor; close to resume. For a click, raise index (left) or index + middle (right), hold briefly, then close the fingers. The cursor parks during clicks. Opening the hand cancels the click. Thumb may rest naturally.")
+            Text("Close/relax the fingers to begin moving your left wrist like a trackpad. Touch thumb to ring for the left button, thumb to middle for the middle button, or curl four fingers with thumb extended for the right button. Hold the pose to keep the button pressed and move your wrist to drag. Release the pose to let go. Open all four fingers to release and reposition; close to resume.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -472,6 +534,10 @@ private struct FloatingGestureMenu: View {
             Slider(value: $sensitivity, in: 0.5...3, step: 0.1)
                 .accessibilityLabel("Trackpad sensitivity")
             Text(mouseStatus).font(.caption.bold())
+            Text(mouseButtonStatus).font(.caption)
+            Toggle("Cursor readiness halo", isOn: $cursorFeedbackEnabled)
+                .toggleStyle(.switch)
+                .help("A quiet ring when the mouse is ready. A thicker ring means a button is held; a short pulse confirms each press or shortcut. Respects Reduce Motion.")
             Toggle("Diagnostic only — no commands", isOn: $diagnosticOnly)
                 .toggleStyle(.switch)
             if diagnosticOnly {
@@ -487,7 +553,7 @@ private struct FloatingGestureMenu: View {
 				}
 				.toggleStyle(.switch)
 				.tint(.purple)
-				.help("Pinch the left hand, move up or down, then hold to keep scrolling. Return to the pinch origin to stop; release or remove the hand to cancel.")
+                .help("Thumb + index pinch scrolls by holding an offset; return to the origin or release to stop.")
 
 				Toggle(isOn: $enableScrub) {
 					Label("Scrub (L pinch + hold offset)", systemImage: "hand.draw.fill")
@@ -509,7 +575,7 @@ private struct FloatingGestureMenu: View {
 				}
 				.toggleStyle(.switch)
 				.tint(.purple)
-				Text("Pinch with the other fingers open to scroll; the cursor parks. Release and close the fingers to resume the trackpad. Thumb contact in a closed hand stays neutral.")
+				Text("Thumb + index controls scroll; thumb + ring controls the left button. The right index points the red laser; the right fist controls Play/Pause. A held mouse button keeps its thicker cursor ring while the laser is visible.")
 					.font(.caption)
 					.foregroundStyle(.secondary)
 				

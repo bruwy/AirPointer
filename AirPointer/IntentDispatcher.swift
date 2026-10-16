@@ -12,6 +12,8 @@ enum SystemAction {
     case volume(delta: Float)
     case moveMouseBy(CGVector)
     case clickMouse(buttonRight: Bool)
+    case mouseButton(MouseButton, pressed: Bool)
+    case dragMouseBy(CGVector, button: MouseButton)
 }
 
 enum CommandDeliveryStatus: String {
@@ -43,6 +45,10 @@ struct LiveSystemActionPerformer: SystemActionPerforming {
             return MouseController.move(by: delta)
         case .clickMouse(let right):
             return MouseController.click(buttonRight: right)
+        case .mouseButton(let button, let pressed):
+            return MouseController.setButton(button, pressed: pressed)
+        case .dragMouseBy(let delta, let button):
+            return MouseController.move(by: delta, dragging: button)
         }
     }
 }

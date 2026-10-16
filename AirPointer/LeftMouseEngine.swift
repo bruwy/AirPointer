@@ -1,118 +1,89 @@
 import CoreGraphics
 import Foundation
 
-/// Both clicks commit on a closed-hand release. An open palm always clutches
-/// and cancels pending clicks, including a 1/2-finger transition on the way up.
+/// Wrist movement keeps the same anchor while fingers form or hold a button.
 @MainActor
 final class LeftMouseEngine {
     struct Output {
         var delta: CGVector?
-        var rightClick: Bool?
+        var desiredButton: MouseButton?
         var status = "Close fingers to begin"
         var evidence = ""
+        var buttonStatus = "Buttons: left hand unavailable"
+        var isReady = false
+        var isPaused = false
     }
     private var pointer = RelativePointerEngine()
+    private let buttons = LeftButtonEngine()
     private var lastAt: Date?
     private var armed = false
     private var closedSince: Date?
-    private var candidate: MouseHandPose.Pose?
-    private var stableTime: TimeInterval = 0
-    private var stableFrames = 0
-    private var uncertainSince: Date?
-    private var pendingClick: Bool?
-    private var sawTwo = false
-    private var scrollSuspended = false
 
     func reset() {
-        pointer.reset(); lastAt = nil; armed = false; closedSince = nil
-        candidate = nil; stableTime = 0; stableFrames = 0; uncertainSince = nil
-        pendingClick = nil; sawTwo = false; scrollSuspended = false
+        pointer.reset(); buttons.reset(); lastAt = nil
+        armed = false; closedSince = nil
     }
 
     func process(frame: AirFrame, reservePinch: Bool, sensitivity: Double = 1.2) -> Output {
         let now = frame.timestamp
         guard now.timeIntervalSinceReferenceDate.isFinite else { reset(); return Output(status: "Invalid timestamp") }
-        let dt = lastAt.map { now.timeIntervalSince($0) } ?? 0
-        if lastAt != nil && (dt <= 0 || dt > AppConfig.GestureTuning.maximumFrameGap) {
-            let watermark = max(lastAt!, now)
-            reset(); lastAt = watermark
-            return Output(status: "Tracking interrupted — close fingers")
+        if let lastAt {
+            let dt = now.timeIntervalSince(lastAt)
+            if dt <= 0 || dt > AppConfig.GestureTuning.maximumFrameGap {
+                let watermark = max(lastAt, now)
+                reset(); self.lastAt = watermark
+                return Output(status: "Tracking interrupted — close fingers")
+            }
         }
         lastAt = now
-        guard let hand = frame.hand(for: .left) else { reset(); return Output(status: "Left hand missing") }
+        guard let hand = frame.hand(for: .left) else {
+            reset()
+            return Output(status: "Left hand missing", buttonStatus: frame.hand(for: .right) == nil
+                ? "Buttons: left hand unavailable" : "Buttons: no left hand — right hand tracked")
+        }
         let evidence = MouseHandPose.analyze(hand)
         var output = Output(evidence: evidence.summary)
-        guard evidence.pose != .unknown, let scale = evidence.scale, let wrist = hand.wrist else {
-            reset(); output.status = "Joints missing — close fingers"; return output
+        guard evidence.pose != .unknown, !evidence.fingers.contains(.missing),
+              let scale = evidence.scale, let wrist = hand.wrist else {
+            reset(); output.status = "Joints missing — close fingers"
+            output.buttonStatus = "Buttons: incomplete finger evidence"; return output
         }
-        // Thumb is irrelevant to finger counts. Only the Deepwork scroll
-        // arbitration needs it; an incomplete pinch cannot turn into a click.
-        if reservePinch {
-            guard let pinch = HandPoseMetrics.pinchDistanceNormalized(from: hand.joints) else {
-                reset(); output.status = "Scroll evidence incomplete"; return output
-            }
-            if pinch < AppConfig.GestureTuning.pinchThresholdOff,
-               evidence.pose != .closed {
-                reset(); lastAt = now; scrollSuspended = true
-                output.status = "Scroll — cursor parked"; return output
-            }
-        }
-        if evidence.pose == .clutch {
+        let buttonPose = LeftButtonPose.analyze(hand, holding: buttons.heldButton)
+        // Keep the existing index-pinch scroll and closed-hand movement arbitration.
+        if reservePinch, evidence.pose != .closed,
+           let pinch = HandPoseMetrics.pinchDistanceNormalized(from: hand.joints),
+           pinch < AppConfig.GestureTuning.pinchThresholdOff {
             reset(); lastAt = now
-            output.status = "Hand open — reposition freely"; return output
+            output.status = "Scroll — cursor parked"; output.isPaused = true
+            output.buttonStatus = "Buttons: released for index scroll"; return output
         }
-        if evidence.pose == .closed {
-            if closedSince == nil { closedSince = now; pointer.reset() }
-            candidate = nil; stableTime = 0; stableFrames = 0; uncertainSince = nil
-            let ready = now.timeIntervalSince(closedSince!) >= AppConfig.MouseTuning.neutralHold
-            guard ready else { output.status = "Closing — rearming"; return output }
-            if let click = pendingClick, armed, !scrollSuspended {
-                output.rightClick = click
-                output.status = click ? "Right click recognized" : "Left click recognized"
-                pointer.reset()
-            } else {
-                output.status = "Trackpad ready"
-                output.delta = pointer.process(wrist: wrist, scale: scale, at: now, sensitivity: sensitivity)
+        let clutch = evidence.fingers.allSatisfy({ $0 == .extended }) && buttonPose.button == nil
+        let button = buttons.process(frame: frame, clutch: clutch)
+        output.buttonStatus = buttons.diagnosticStatus
+        output.evidence += " · " + buttons.diagnosticStatus + "\n" + LeftButtonPose.diagnosticEvidence(hand)
+        if clutch {
+            pointer.reset(); armed = false; closedSince = nil
+            output.status = "Hand open — reposition freely"; output.isPaused = true; return output
+        }
+        if !armed {
+            guard evidence.pose == .closed, buttonPose.button == nil else {
+                closedSince = nil; pointer.reset()
+                output.status = "Close fingers to arm"; return output
             }
-            pendingClick = nil; sawTwo = false; armed = true; scrollSuspended = false
-            return output
-        }
-        closedSince = nil
-        pointer.reset() // park the cursor while forming or releasing a click
-        guard armed, !scrollSuspended else { output.status = "Close fingers to arm"; return output }
-        if evidence.fingers.prefix(2).allSatisfy({ $0 == .extended }) {
-            if !sawTwo { pendingClick = nil }
-            sawTwo = true
-        }
-        if evidence.fingers[2] == .extended || evidence.fingers[3] == .extended {
-            pendingClick = nil; armed = false
-        }
-        if evidence.pose == .transition {
-            if uncertainSince == nil { uncertainSince = now }
-            // A short ambiguous geometry frame pauses, never advances, evidence.
-            // A real missing hand/joint above cancels immediately.
-            if now.timeIntervalSince(uncertainSince!) > 0.10 {
-                candidate = nil; stableTime = 0; stableFrames = 0
-                // Preserve a confirmed click through the gradual descent of
-                // the index; other raised fingers cannot become a single.
-                if evidence.fingers.dropFirst().contains(.extended) && pendingClick == false { pendingClick = nil }
+            if closedSince == nil { closedSince = now }
+            guard now.timeIntervalSince(closedSince!) >= AppConfig.MouseTuning.neutralHold else {
+                output.status = "Closing — rearming"; return output
             }
-            output.status = pendingClick == nil ? "Adjust fingers" : "Close fingers to click"
-            return output
+            armed = true
         }
-        let resumingEvidence = uncertainSince != nil
-        uncertainSince = nil
-        if candidate != evidence.pose {
-            candidate = evidence.pose; stableTime = 0; stableFrames = 1
-        } else {
-            if !resumingEvidence { stableTime += min(dt, 1.0 / 15.0) }
-            stableFrames += 1
+        output.isReady = true
+        output.desiredButton = button.desiredButton
+        output.status = button.desiredButton.map { "\($0.title) pressed — move to drag" } ?? "Trackpad ready"
+        output.delta = pointer.process(wrist: wrist, scale: scale, at: now, sensitivity: sensitivity)
+        if !pointer.isAnchored {
+            reset()
+            return Output(status: "Tracking jump — close fingers", evidence: evidence.summary)
         }
-        if stableTime >= AppConfig.MouseTuning.poseHold && stableFrames >= 3 {
-            if evidence.pose == .two { pendingClick = true }
-            else if !sawTwo { pendingClick = false }
-        }
-        output.status = pendingClick == nil ? "Hold fingers briefly" : (pendingClick! ? "Close for RIGHT click" : "Close for LEFT click")
         return output
     }
 }

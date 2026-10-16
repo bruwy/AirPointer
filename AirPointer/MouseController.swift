@@ -9,7 +9,7 @@ enum MouseController {
 
     /// Relative movement always starts from the live Quartz cursor.
     @discardableResult
-    static func move(by delta: CGVector) -> Bool {
+    static func move(by delta: CGVector, dragging button: MouseButton? = nil) -> Bool {
         guard CGPreflightPostEventAccess(), let current = currentFlippedLocation(),
               delta.dx.isFinite, delta.dy.isFinite,
               hypot(delta.dx, delta.dy) <= 96.001 else { return false }
@@ -18,12 +18,46 @@ enum MouseController {
             return CGDisplayBounds(number.uint32Value)
         }
         guard let point = relativePoint(current: current, delta: delta, screens: screens),
-              let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
-                                  mouseCursorPosition: point, mouseButton: .left) else { return false }
+              let event = movementEvent(at: point, dragging: button) else { return false }
         event.setIntegerValueField(.mouseEventDeltaX, value: Int64((point.x - current.x).rounded()))
         event.setIntegerValueField(.mouseEventDeltaY, value: Int64((point.y - current.y).rounded()))
         event.post(tap: .cghidEventTap)
         return true
+    }
+
+    static func movementEvent(at point: CGPoint, dragging button: MouseButton?) -> CGEvent? {
+        guard point.x.isFinite, point.y.isFinite else { return nil }
+        let type: CGEventType
+        switch button {
+        case .left: type = .leftMouseDragged
+        case .right: type = .rightMouseDragged
+        case .middle: type = .otherMouseDragged
+        case nil: type = .mouseMoved
+        }
+        return CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point,
+                       mouseButton: button?.quartzButton ?? .left)
+    }
+
+    @discardableResult
+    static func setButton(_ button: MouseButton, pressed: Bool) -> Bool {
+        guard CGPreflightPostEventAccess(), let point = currentFlippedLocation(),
+              let event = buttonEvent(button, pressed: pressed, at: point) else { return false }
+        event.post(tap: .cghidEventTap)
+        return true
+    }
+
+    static func buttonEvent(_ button: MouseButton, pressed: Bool, at point: CGPoint) -> CGEvent? {
+        guard point.x.isFinite, point.y.isFinite else { return nil }
+        let type: CGEventType
+        switch button {
+        case .left: type = pressed ? .leftMouseDown : .leftMouseUp
+        case .right: type = pressed ? .rightMouseDown : .rightMouseUp
+        case .middle: type = pressed ? .otherMouseDown : .otherMouseUp
+        }
+        let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point,
+                            mouseButton: button.quartzButton)
+        event?.setIntegerValueField(.mouseEventClickState, value: 1)
+        return event
     }
 
     static func relativePoint(current: CGPoint, delta: CGVector, screens: [CGRect]) -> CGPoint? {
@@ -127,5 +161,15 @@ enum MouseController {
             return true
         }
         return false
+    }
+}
+
+private extension MouseButton {
+    var quartzButton: CGMouseButton {
+        switch self {
+        case .left: return .left
+        case .right: return .right
+        case .middle: return .center
+        }
     }
 }

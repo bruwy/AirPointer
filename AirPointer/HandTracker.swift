@@ -186,7 +186,12 @@ final class HandTracker: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
 			return
 		}
 
-		let observations = request.results ?? []
+		publish(processObservations(request.results ?? []), at: observationAt, revision: revision)
+	}
+
+	// Shared by live capture and the offline native-Vision probe.
+	func processObservations(_ observations: [VNHumanHandPoseObservation])
+		-> [String: [VNHumanHandPoseObservation.JointName: CGPoint]] {
 		let assignedHands = assignHands(from: observations)
 		var stabilized = stabilize(assignedHands)
 
@@ -197,7 +202,7 @@ final class HandTracker: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
 			stabilized[Self.rightKey] = left
 		}
 
-		publish(stabilized, at: observationAt, revision: revision)
+		return stabilized
 	}
 
 	private func assignHands(

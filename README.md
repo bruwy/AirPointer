@@ -6,7 +6,7 @@
 
 Control your Mac with camera-based hand gestures. AirPointer uses Apple's Vision framework to track hands locally, then translates gestures into pointer movement, clicks and shortcuts.
 
-This development snapshot is **V4 Trackpad (0.4)**. Gesture accuracy depends on lighting, framing and hand visibility. Synthetic tests cover the command pipeline; they do not establish real-world tracking accuracy.
+This local development variant adds cursor feedback and held mouse buttons to **V4 Trackpad (0.4)**. Gesture accuracy depends on lighting, framing and hand visibility. Synthetic tests cover the command pipeline; they do not establish real-world tracking accuracy.
 
 Licensed under the [MIT License](LICENSE). Copyright © 2025–2026 Bruno Schreiber. The original app icon is included under the same license; see [dependencies and artwork](docs/DEPENDENCIES.md).
 
@@ -43,15 +43,23 @@ The launch modes quit any existing AirPointer process first. `--build-only` neit
 
 | Left-hand gesture | Action |
 | --- | --- |
-| Close/relax all four fingers, then move the wrist | Relative pointer movement |
-| Open the palm | Pause and reposition; cancel a pending click |
-| Raise only the index finger, then close the fingers | Left click |
-| Raise index and middle fingers, then close the fingers | Right click |
-| Pinch with the other fingers open in Deepwork | Continuous scroll |
+| Close/relax fingers, then move the wrist | Relative pointer movement |
+| Open all four fingers | Release any button, pause and reposition |
+| Touch thumb to ring, with index/middle/little extended | Hold left mouse button |
+| Touch thumb to middle, with index/ring/little extended | Hold middle mouse button |
+| Curl four fingers and extend the thumb | Hold right mouse button |
 
-The pointer stays still while a click forms. Hold a click pose for about 0.20 seconds, then close for about 0.12 seconds. Sensitivity ranges from 0.5× to 3×; the default is 1.2× and applies to the current session.
+A stable button pose presses once; holding it keeps the button down. Move the same wrist to drag and release the pose to let go. Finger changes keep the wrist/palm anchor, so movement continues while forming a button. A direct button change releases the old button before confirming the new one. Tracking loss, stop, settings/permission changes and the capture watchdog release the owned button and require neutral rearming.
 
-In Presentation mode, right-hand double pinch advances, and an open-hand-to-held-fist sequence goes back. The right pinky gesture invokes the configured mute shortcut. Shortcut behavior depends on the selected profile and foreground application; see `IntentDispatcher.swift` for mappings.
+In Deepwork, **thumb + index pinch remains scroll**: shift the wrist vertically for scroll or horizontally for scrub, then hold the offset to continue. Return to the pinch origin or release to stop. Scroll releases any owned mouse button before posting its first event; it never becomes a left click. Sensitivity ranges from 0.5× to 3×; the default is 1.2× and applies to the current session.
+
+In Presentation mode, right-hand double pinch advances, and an open-hand-to-held-fist sequence goes back. The right pinky gesture invokes the configured mute shortcut. In Deepwork, right pointing drives the existing red laser and the right fist controls Play/Pause. The right hand never moves or presses the actual mouse. Shortcut behavior depends on the selected profile and foreground application; see `IntentDispatcher.swift` for mappings.
+
+The **Gestures** switch stays visible above the camera, outside menus and scroll views. Turning it off releases any held button, cancels pending commands and hides the halo/laser without closing the app or camera preview. Its preference persists. After turning it back on, each hand must show a stable neutral pose before that hand can emit commands: relax/close or fully open the left fingers, and open the right hand. A missing or held command pose cannot rearm it. The visible gesture guide lists mouse holds, scroll and each profile’s real right-hand actions.
+
+**Button status** stays visible beside the Gestures switch. It shows whether the left hand is tracked, whether neutral rearming is needed, which button pose is recognized, and which button was posted to macOS. Diagnostic-only mode shows recognition without sending events. Fully open, then close the left hand to rearm if a held pose is not accepted.
+
+**Cursor readiness halo** in gesture settings enables a small, hollow ring around the actual macOS cursor. It enters briefly, then stays static while the left mouse is ready. An accepted press or discrete shortcut gives one short pulse; a thicker static ring means a button remains held. Pause, tracking expiry and stop fade it out. The right laser suppresses the ordinary ready ring, while a held button retains its thicker ring. The preference persists; Reduce Motion replaces scaling with a brief contrast change. The ring passes all clicks through and cannot take keyboard focus.
 
 ## Tests without camera or UI
 
